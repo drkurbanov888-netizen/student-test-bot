@@ -1,108 +1,140 @@
 import logging
-from telegram import Update
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
-    ContextTypes,
     CommandHandler,
     MessageHandler,
+    filters,
+    ContextTypes,
     ConversationHandler,
-    filters
 )
 
+# Токен вашего бота
 TOKEN = "9247629027:AAHVWlwGdEq2man8hx9GHwI764PjXzWXY9E"
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# Список из 10 вопросов для теста
+# Состояния разговора
+GET_NAME, GET_GROUP, TESTING = range(3)
+
 QUESTIONS = [
-    "1. Какой орган отвечает за фильтрацию крови в организме человека?",
-    "2. Какой отдел кишечника является самым длинным?",
-    "3. Какой витамин синтезируется в коже под действием солнечных лучей?",
-    "4. Какая железа вырабатывает инсулин?",
-    "5. Как называется основной фермент желудочного сока, расщепляющий белки?",
-    "6. Какой газ преобладает во вдыхаемом воздухе?",
-    "7. Нормальная температура здорового человека (в градусах Цельсия)?",
-    "8. Сколько камер у сердца человека?",
-    "9. Какая группа крови является универсальной для переливания?",
-    "10. Какой орган человека обладает способностью к наибольшей регенерации?"
+    {
+        "question": "1. Что такое гастрит?",
+        "options": ["А) Воспаление слизистой оболочки желудка", "Б) Заболевание печени", "В) Инфекция почек"],
+        "correct": "А"
+    },
+    {
+        "question": "2. Основная функция тонкого кишечника?",
+        "options": ["А) Всасывание питательных веществ", "Б) Выработка желчи", "В) Фильтрация крови"],
+        "correct": "А"
+    }
 ]
 
-# Функция старта теста
-async def start_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['answers'] = []
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Здравствуйте! Для прохождения теста введите ваши **ФИО** (Фамилия Имя Отчество):",
+        parse_mode="Markdown",
+        protect_content=True
+    )
+    return GET_NAME
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['student_name'] = update.message.text
+    await update.message.reply_text(
+        "Отлично. Теперь введите номер вашей **группы** (например, ИС-21):",
+        parse_mode="Markdown",
+        protect_content=True
+    )
+    return GET_GROUP
+
+async def get_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['student_group'] = update.message.text
+    context.user_data['score'] = 0
     context.user_data['current_q'] = 0
     
+    name = context.user_data['student_name']
+    group = context.user_data['student_group']
+    
     await update.message.reply_text(
-        "📝 Добро пожаловать на тестирование!\n"
-        "Вам предстоит ответить на 10 вопросов.\n\n"
-        f"<b>Вопрос 1 из 10:</b>\n{QUESTIONS[0]}",
-        parse_mode="HTML"
+        f"Спасибо, {name} (группа {group}). Начинаем тест! Вопросы защищены от копирования.",
+        protect_content=True
     )
-    return 0
+    return await send_question(update, context)
 
-# Функция обработки ответов на вопросы
-async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    current_q_index = context.user_data.get('current_q', 0)
-    user_answer = update.message.text
+async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q_index = context.user_data['current_q']
     
-    # Сохраняем ответ
-    answers = context.user_data.setdefault('answers', [])
-    answers.append({
-        "question": QUESTIONS[current_q_index],
-        "answer": user_answer
-    })
-    
-    # Переходим к следующему вопросу
-    current_q_index += 1
-    context.user_data['current_q'] = current_q_index
-    
-    if current_q_index < len(QUESTIONS):
-        # Задаем следующий вопрос
-        await update.message.reply_text(
-            f"Ответ принят! ✅\n\n<b>Вопрос {current_q_index + 1} из 10:</b>\n{QUESTIONS[current_q_index]}",
-            parse_mode="HTML"
-        )
-        return current_q_index
+    if q_index < len(QUESTIONS):
+        q_data = QUESTIONS[q_index]
+        text = f"*{q_data['question']}*\n\n" + "\n".join(q_data['options']) + "\n\n_(Напишите в ответ только букву правильного варианта: А, Б или В)_"
+        
+        await update.message.reply_text(text, parse_mode="Markdown", protect_content=True)
+        return TESTING
     else:
-        # Тест завершен
-        result_text = "🎉 <b>Тест успешно завершен! Спасибо!</b>\n\nВаши ответы:\n"
-        for i, item in enumerate(answers, 1):
-            result_text += f"\n{i}. {item['question']}\nОтвет: <i>{item['answer']}</i>\n"
+        score = context.user_data['score']
+        name = context.user_data['student_name']
+        group = context.user_data['student_group']
+        total = len(QUESTIONS)
         
-        await update.message.reply_text(result_text, parse_mode="HTML")
-        
-        # Вывод в терминал преподавателя
-        print(f"Студент {update.effective_user.full_name} завершил тест!")
-        for item in answers:
-            print(f" - {item['question']}: {item['answer']}")
-            
+        await update.message.reply_text(
+            f"🎉 **Тест завершен!**\n\n"
+            f"👤 Студент: {name}\n"
+            f"🏫 Группа: {group}\n"
+            f"📊 Результат: **{score} из {total}** правильных ответов.",
+            parse_mode="Markdown",
+            protect_content=True
+        )
         return ConversationHandler.END
 
-async def cancel_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Тестирование отменено.")
+async def check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_answer = update.message.text.strip().upper()
+    q_index = context.user_data['current_q']
+    q_data = QUESTIONS[q_index]
+    
+    if user_answer.startswith(q_data['correct']):
+        context.user_data['score'] += 1
+        
+    context.user_data['current_q'] += 1
+    return await send_question(update, context)
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Тест отменен.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-def main():
-    application = ApplicationBuilder().token(TOKEN).build()
+# Простой HTTP-сервер для того, чтобы Render считал веб-сервис живым
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
 
-    # Динамически создаем состояния для всех 10 вопросов
-    states_dict = {}
-    for i in range(len(QUESTIONS)):
-        states_dict[i] = [MessageHandler(filters.TEXT & (~filters.COMMAND), handle_answer)]
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
+def main():
+    # Запускаем HTTP-сервер в отдельном потоке для Render Web Service
+    t = threading.Thread(target=run_http_server, daemon=True)
+    t.start()
+
+    app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("test", start_test)],
-        states=states_dict,
-        fallbacks=[CommandHandler("cancel", cancel_test)],
+        entry_points=[CommandHandler("test", start)],
+        states={
+            GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+            GET_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_group)],
+            TESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_answer)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    application.add_handler(conv_handler)
-    
-    print("Бот с тестом на 10 вопросов успешно запущен...")
-    application.run_polling()
+    app.add_handler(conv_handler)
+    app.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
